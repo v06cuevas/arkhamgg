@@ -156,6 +156,11 @@ export default function ProductsPage() {
   const [filterCategory, setFilterCategory] = useState<string>("all")
   const [filterSupplier, setFilterSupplier] = useState<string>("all")
   const [filterStockStatus, setFilterStockStatus] = useState<string>("all")
+  const [visibleProductLimit, setVisibleProductLimit] = useState(100)
+
+  useEffect(() => {
+    setVisibleProductLimit(100)
+  }, [searchTerm, filterCategory, filterSupplier, filterStockStatus, currentUser?.id])
 
   // Quick inventory dialog state
   const [stockProduct, setStockProduct] = useState<Product | null>(null)
@@ -603,7 +608,7 @@ export default function ProductsPage() {
 
   // Limit rendering only; searches and filters always use the complete inventory.
   const hasProductSearchOrFilters = normalizedSearchTerm.length > 0 || activeFilterCount > 0
-  const productsToDisplay = hasProductSearchOrFilters ? filteredProducts : filteredProducts.slice(0, 100)
+  const productsToDisplay = hasProductSearchOrFilters ? filteredProducts : filteredProducts.slice(0, visibleProductLimit)
 
   const handleInputChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -1556,12 +1561,6 @@ export default function ProductsPage() {
         </DialogContent>
       </Dialog>
 
-      <p className="text-sm text-muted-foreground">
-        {hasProductSearchOrFilters
-          ? `${productsToDisplay.length} productos encontrados`
-          : `Mostrando ${productsToDisplay.length} de ${catalogProducts.length} productos. Busca o aplica filtros para ver todas las coincidencias.`}
-      </p>
-
       <div className="space-y-3 md:hidden">
         {productsToDisplay.length === 0 ? (
           <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
@@ -1725,6 +1724,18 @@ export default function ProductsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {!hasProductSearchOrFilters && productsToDisplay.length < filteredProducts.length && (
+        <div className="flex justify-center py-4">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setVisibleProductLimit((current) => current + 100)}
+          >
+            Mostrar 100 productos más
+          </Button>
+        </div>
+      )}
 
       <Dialog open={isInvoiceHistoryDialogOpen} onOpenChange={(open) => {
         setIsInvoiceHistoryDialogOpen(open)
