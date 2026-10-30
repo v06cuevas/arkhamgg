@@ -440,7 +440,7 @@ export default function ProductsPage() {
     setStockQty("")
   }
 
-  const handleAddStock = () => {
+  const handleAddStock = async () => {
     if (!canEditProducts) {
       toast({
         title: "Sin permiso",
@@ -469,11 +469,17 @@ export default function ProductsPage() {
       })
       return
     }
-    updateProduct(stockProduct.id, { stock: newStock })
-    toast({
-      title: "Inventario actualizado",
-      description: `${stockProduct.name}: ${stockProduct.stock} → ${newStock}`,
-    })
+    try {
+      await updateProduct(stockProduct.id, { stock: newStock })
+      toast({
+        title: "Inventario actualizado",
+        description: `${stockProduct.name}: ${stockProduct.stock} -> ${newStock}`,
+      })
+    } catch (error) {
+      const saveError = getProductSaveError(error, stockProduct.sku)
+      toast({ title: saveError.title, description: saveError.description, variant: "destructive" })
+      return
+    }
 
     const updatedProduct = { ...stockProduct, stock: newStock }
     setStockProduct(null)
@@ -577,11 +583,12 @@ export default function ProductsPage() {
     return uniqueCategories
   }, [catalogProducts, formData.category, managedCategories])
 
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase()
   const filteredProducts = catalogProducts
     .filter(
       (product) =>
-        product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        product.sku.toLowerCase().includes(searchTerm.toLowerCase()),
+        product.name.toLowerCase().includes(normalizedSearchTerm) ||
+        product.sku.toLowerCase().includes(normalizedSearchTerm),
     )
     .filter((product) => filterCategory === "all" || product.category === filterCategory)
     .filter((product) => filterSupplier === "all" || product.supplier === filterSupplier)
@@ -593,6 +600,10 @@ export default function ProductsPage() {
       return true
     })
     .sort((a, b) => b.sku.localeCompare(a.sku, undefined, { numeric: true }))
+
+  // Limit rendering only; searches and filters always use the complete inventory.
+  const hasProductSearchOrFilters = normalizedSearchTerm.length > 0 || activeFilterCount > 0
+  const productsToDisplay = hasProductSearchOrFilters ? filteredProducts : filteredProducts.slice(0, 100)
 
   const handleInputChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -611,16 +622,19 @@ export default function ProductsPage() {
     const sku = formData.sku.trim()
     const name = formData.name.trim()
     const category = formData.category.trim()
-    const buyPrice = Number.parseFloat(formData.buyPrice)
-    const sellPrice = Number.parseFloat(formData.sellPrice)
-    const stock = Number.parseInt(formData.stock, 10)
+    const buyPrice = Number(formData.buyPrice)
+    const sellPrice = Number(formData.sellPrice)
+    const wholesalePrice = formData.wholesalePrice.trim() === "" ? 0 : Number(formData.wholesalePrice)
+    const minimumSellPrice = formData.minimumSellPrice.trim() === "" ? 0 : Number(formData.minimumSellPrice)
+    const stock = Number(formData.stock)
+    const minStock = formData.minStock.trim() === "" ? 0 : Number(formData.minStock)
 
     if (!sku || !name || !category || formData.buyPrice.trim() === "" || formData.sellPrice.trim() === "" || formData.stock.trim() === "") {
       toast({ title: "Faltan datos obligatorios", description: "Completa la ID, el nombre, la categoría, los precios y el inventario. El inventario puede ser 0.", variant: "destructive" })
       return
     }
 
-    if (!Number.isFinite(buyPrice) || buyPrice < 0 || !Number.isFinite(sellPrice) || sellPrice < 0 || !Number.isInteger(stock) || stock < 0) {
+    if (!Number.isFinite(buyPrice) || buyPrice < 0 || !Number.isFinite(sellPrice) || sellPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(minimumSellPrice) || minimumSellPrice < 0 || !Number.isInteger(stock) || stock < 0 || !Number.isInteger(minStock) || minStock < 0) {
       toast({ title: "Datos numéricos inválidos", description: "Los precios deben ser números mayores o iguales a 0 y el inventario debe ser un entero mayor o igual a 0.", variant: "destructive" })
       return
     }
@@ -656,11 +670,11 @@ export default function ProductsPage() {
         name,
         category,
         buyPrice,
-        wholesalePrice: Number.parseFloat(formData.wholesalePrice) || 0,
+        wholesalePrice,
         sellPrice,
-        minimumSellPrice: Number.parseFloat(formData.minimumSellPrice) || 0,
+        minimumSellPrice,
         stock,
-        minStock: Number.parseInt(formData.minStock) || 0,
+        minStock,
         supplier: formData.supplier,
         capacity: formData.capacity || undefined,
         imei: formData.imei || undefined,
@@ -676,11 +690,11 @@ export default function ProductsPage() {
         name,
         category,
         buyPrice,
-        wholesalePrice: Number.parseFloat(formData.wholesalePrice) || 0,
+        wholesalePrice,
         sellPrice,
-        minimumSellPrice: Number.parseFloat(formData.minimumSellPrice) || 0,
+        minimumSellPrice,
         stock,
-        minStock: Number.parseInt(formData.minStock) || 0,
+        minStock,
         supplier: formData.supplier,
         capacity: formData.capacity || undefined,
         imei: formData.imei || undefined,
@@ -1542,13 +1556,19 @@ export default function ProductsPage() {
         </DialogContent>
       </Dialog>
 
+      <p className="text-sm text-muted-foreground">
+        {hasProductSearchOrFilters
+          ? `${productsToDisplay.length} productos encontrados`
+          : `Mostrando ${productsToDisplay.length} de ${catalogProducts.length} productos. Busca o aplica filtros para ver todas las coincidencias.`}
+      </p>
+
       <div className="space-y-3 md:hidden">
-        {filteredProducts.length === 0 ? (
+        {productsToDisplay.length === 0 ? (
           <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
             No se encontraron productos
           </div>
         ) : (
-          filteredProducts.map((product) => {
+          productsToDisplay.map((product) => {
             const stockStatus = product.stock === 0 ? "Sin stock" : product.stock <= (product.minStock || 0) ? "Stock bajo" : "En stock"
             return (
               <div key={product.id} className="overflow-hidden rounded-lg border bg-background p-3 shadow-sm">
@@ -1635,14 +1655,14 @@ export default function ProductsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredProducts.length === 0 ? (
+                {productsToDisplay.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={12} className="text-center py-8 text-muted-foreground">
                       No se encontraron productos
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredProducts.map((product) => (
+                  productsToDisplay.map((product) => (
                     <TableRow key={product.id}>
                       <TableCell className="font-medium">{product.sku}</TableCell>
                       <TableCell>

@@ -7,6 +7,7 @@ import {
   HandCoins,
   Paperclip,
   PackagePlus,
+  Pencil,
   Plus,
   Receipt,
   Search,
@@ -79,6 +80,7 @@ export default function FacturasPage() {
     purchases,
     supplierPayments,
     addPurchase,
+    updatePurchase,
     addSupplierPayment,
     addProduct,
     calculateLateFee,
@@ -90,6 +92,7 @@ export default function FacturasPage() {
 
   const employeePermissions = employees.find((employee) => employee.email === currentUser?.email)?.permissions
   const canAdd = currentUser?.role === "admin" || Boolean(employeePermissions?.canAdd)
+  const canEdit = currentUser?.role === "admin" || Boolean(employeePermissions?.canEdit)
 
   // ---------- Filtros del listado ----------
   const [search, setSearch] = useState("")
@@ -127,6 +130,14 @@ export default function FacturasPage() {
 
   // ---------- Diálogo: ver detalle / adjunto ----------
   const [detailPurchase, setDetailPurchase] = useState<Purchase | null>(null)
+  const [editingPurchase, setEditingPurchase] = useState<Purchase | null>(null)
+  const [editLines, setEditLines] = useState<Line[]>([])
+  const [editDate, setEditDate] = useState("")
+  const [editSupplierInvoiceNumber, setEditSupplierInvoiceNumber] = useState("")
+  const [editNcf, setEditNcf] = useState("")
+  const [editItbis, setEditItbis] = useState(0)
+  const [editNotes, setEditNotes] = useState("")
+  const [editSaving, setEditSaving] = useState(false)
 
   const selectedSupplier = suppliers.find((item) => item.id === selectedSupplierId)
   const paymentSupplier = suppliers.find((item) => item.id === paymentSupplierId)
@@ -141,6 +152,8 @@ export default function FacturasPage() {
   const total = subtotal + (includesItbis ? Math.max(0, Number(itbis) || 0) : 0)
   const effectivePaid = paymentType === "contado" ? total : Math.min(total, Math.max(0, amountPaid))
   const debtCreated = Math.max(0, total - effectivePaid)
+  const editSubtotal = editLines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unitPrice || 0), 0)
+  const editTotal = editSubtotal + Math.max(0, Number(editItbis) || 0)
 
   useEffect(() => {
     try {
@@ -225,6 +238,108 @@ export default function FacturasPage() {
       wholesalePrice: product.wholesalePrice,
       sellPrice: product.sellPrice,
     })
+  }
+
+  const chooseEditProduct = (lineId: string, productId: string) => {
+    const product = products.find((item) => item.id === productId)
+    if (!product) return
+    setEditLines((current) => current.map((line) => line.id === lineId
+      ? {
+          ...line,
+          productId,
+          name: product.name,
+          sku: product.sku,
+          category: product.category,
+          unitPrice: product.buyPrice,
+          wholesalePrice: product.wholesalePrice,
+          sellPrice: product.sellPrice,
+        }
+      : line))
+  }
+
+  const openPurchaseEditor = (purchase: Purchase) => {
+    setDetailPurchase(null)
+    setEditingPurchase(purchase)
+    setEditDate(new Date(purchase.date).toISOString().slice(0, 10))
+    setEditSupplierInvoiceNumber(purchase.supplierInvoiceNumber || "")
+    setEditNcf(purchase.ncf || "")
+    setEditItbis(Number(purchase.itbis ?? purchase.tax) || 0)
+    setEditNotes(purchase.notes || "")
+    setEditLines(purchase.items.map((item) => {
+      const product = products.find((entry) => entry.id === item.productId)
+      return {
+        id: item.id,
+        mode: purchase.purchaseKind === "productos" ? "existing" : "gasto",
+        productId: item.productId,
+        name: item.productName,
+        sku: product?.sku || "",
+        category: product?.category || "General",
+        boxNumber: product?.boxNumber || "",
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        wholesalePrice: product?.wholesalePrice || 0,
+        sellPrice: item.sellPrice ?? product?.sellPrice ?? 0,
+      }
+    }))
+  }
+
+  const savePurchaseEdit = async () => {
+    if (!editingPurchase) return
+
+    const isInventoryPurchase = editingPurchase.purchaseKind === "productos" || !editingPurchase.purchaseKind
+    const invalidLine = editLines.some((line) =>
+      !line.name.trim() || line.quantity <= 0 || line.unitPrice < 0 || (isInventoryPurchase && !line.productId),
+    )
+    if (!editDate || editLines.length === 0 || invalidLine) {
+      toast({ title: "Datos incompletos", description: "Revisa la fecha y todas las líneas de la factura.", variant: "destructive" })
+      return
+    }
+
+    const items: PurchaseItem[] = editLines.map((line) => ({
+      id: line.id,
+      productId: isInventoryPurchase ? line.productId : line.productId || `gasto-${line.id}`,
+      productName: line.name.trim(),
+      quantity: Number(line.quantity),
+      unitPrice: Number(line.unitPrice),
+      sellPrice: isInventoryPurchase ? Number(line.sellPrice) : undefined,
+      total: Number(line.quantity) * Number(line.unitPrice),
+    }))
+    const totalWithTax = editTotal
+
+    if (totalWithTax < editingPurchase.amountPaid) {
+      toast({ title: "El total no puede ser menor que lo abonado", description: "Los abonos existentes no se modifican desde esta pantalla.", variant: "destructive" })
+      return
+    }
+
+    const status: Purchase["status"] = totalWithTax <= editingPurchase.amountPaid
+      ? "pagado"
+      : editingPurchase.amountPaid > 0 ? "parcial" : "pendiente"
+
+    setEditSaving(true)
+    try {
+      await updatePurchase(editingPurchase.id, {
+        date: new Date(`${editDate}T12:00:00`).toISOString(),
+        supplierInvoiceNumber: editSupplierInvoiceNumber.trim(),
+        ncf: editNcf.trim(),
+        items,
+        subtotal: editSubtotal,
+        tax: editItbis,
+        itbis: editItbis,
+        total: totalWithTax,
+        status,
+        notes: editNotes.trim(),
+      })
+      toast({ title: "Factura actualizada" })
+      setEditingPurchase(null)
+    } catch (error) {
+      toast({
+        title: "No se pudo actualizar la factura",
+        description: error instanceof Error ? error.message : "Revisa la conexión y vuelve a intentarlo.",
+        variant: "destructive",
+      })
+    } finally {
+      setEditSaving(false)
+    }
   }
 
   const changeKind = (kind: PurchaseKind) => {
@@ -329,6 +444,7 @@ export default function FacturasPage() {
             productName: line.name.trim(),
             quantity: line.quantity,
             unitPrice: line.unitPrice,
+            sellPrice: line.sellPrice || line.unitPrice,
             total: line.quantity * line.unitPrice,
           })
         } else if (purchaseKind === "productos") {
@@ -338,6 +454,7 @@ export default function FacturasPage() {
             productName: line.name,
             quantity: line.quantity,
             unitPrice: line.unitPrice,
+            sellPrice: line.sellPrice,
             total: line.quantity * line.unitPrice,
           })
         } else {
@@ -550,7 +667,15 @@ export default function FacturasPage() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <Button variant="ghost" size="sm" onClick={() => setDetailPurchase(purchase)}>Ver</Button>
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="sm" onClick={() => setDetailPurchase(purchase)}>Ver</Button>
+                          {canEdit && (
+                            <Button variant="ghost" size="icon" title="Editar factura" onClick={() => openPurchaseEditor(purchase)}>
+                              <Pencil />
+                              <span className="sr-only">Editar factura</span>
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -760,10 +885,10 @@ export default function FacturasPage() {
                   )}
                   <div className="grid gap-4 sm:grid-cols-3">
                     <div><Label>Costo unitario</Label><Input type="number" min="0" value={line.unitPrice} onChange={(event) => updateLine(line.id, { unitPrice: Number(event.target.value) })} /></div>
-                    {purchaseKind === "productos" && line.mode === "new" && (
+                    {purchaseKind === "productos" && (
                       <>
                         <div><Label>Precio venta</Label><Input type="number" min="0" value={line.sellPrice} onChange={(event) => updateLine(line.id, { sellPrice: Number(event.target.value) })} /></div>
-                        {destination === "armacen" && <div><Label>Número de caja</Label><Input value={line.boxNumber} onChange={(event) => updateLine(line.id, { boxNumber: event.target.value })} /></div>}
+                        {line.mode === "new" && destination === "armacen" && <div><Label>Número de caja</Label><Input value={line.boxNumber} onChange={(event) => updateLine(line.id, { boxNumber: event.target.value })} /></div>}
                       </>
                     )}
                   </div>
@@ -896,6 +1021,89 @@ export default function FacturasPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={Boolean(editingPurchase)} onOpenChange={(open) => !open && setEditingPurchase(null)}>
+        <DialogContent className="max-h-[92vh] w-[95vw] max-w-[95vw] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Editar factura {editingPurchase?.invoiceNumber}</DialogTitle>
+          </DialogHeader>
+          {editingPurchase && (
+            <div className="flex flex-col gap-5">
+              <p className="text-sm text-muted-foreground">Proveedor: {editingPurchase.supplierName}. Los abonos registrados no se modifican.</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field><FieldLabel>Fecha</FieldLabel><Input type="date" value={editDate} onChange={(event) => setEditDate(event.target.value)} /></Field>
+                <Field><FieldLabel>N° de factura del proveedor</FieldLabel><Input value={editSupplierInvoiceNumber} onChange={(event) => setEditSupplierInvoiceNumber(event.target.value)} /></Field>
+                <Field><FieldLabel>NCF</FieldLabel><Input value={editNcf} onChange={(event) => setEditNcf(event.target.value)} /></Field>
+                <Field><FieldLabel>ITBIS</FieldLabel><Input type="number" min="0" value={editItbis} onChange={(event) => setEditItbis(Number(event.target.value))} /></Field>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold">Líneas de la factura</h3>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditLines((current) => [...current, emptyLine(editingPurchase.purchaseKind === "productos" || !editingPurchase.purchaseKind ? "productos" : "otros")])}
+                >
+                  <Plus data-icon="inline-start" /> Agregar línea
+                </Button>
+              </div>
+
+              {editLines.map((line, index) => {
+                const isInventoryPurchase = editingPurchase.purchaseKind === "productos" || !editingPurchase.purchaseKind
+                return (
+                  <Card key={line.id}>
+                    <CardContent className="flex flex-col gap-4 p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium">Línea {index + 1}</p>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Eliminar línea"
+                          disabled={editLines.length === 1}
+                          onClick={() => setEditLines((current) => current.filter((item) => item.id !== line.id))}
+                        >
+                          <Trash2 />
+                          <span className="sr-only">Eliminar línea</span>
+                        </Button>
+                      </div>
+                      {isInventoryPurchase ? (
+                        <div>
+                          <Label>Producto</Label>
+                          <ProductSearchSelect products={products} value={line.productId} onChange={(productId) => chooseEditProduct(line.id, productId)} />
+                        </div>
+                      ) : (
+                        <div>
+                          <Label>Concepto</Label>
+                          <Input value={line.name} onChange={(event) => setEditLines((current) => current.map((item) => item.id === line.id ? { ...item, name: event.target.value } : item))} />
+                        </div>
+                      )}
+                      <div className={`grid gap-4 ${isInventoryPurchase ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
+                        <Field><FieldLabel>Cantidad</FieldLabel><Input type="number" min="1" value={line.quantity} onChange={(event) => setEditLines((current) => current.map((item) => item.id === line.id ? { ...item, quantity: Number(event.target.value) } : item))} /></Field>
+                        <Field><FieldLabel>Costo unitario</FieldLabel><Input type="number" min="0" value={line.unitPrice} onChange={(event) => setEditLines((current) => current.map((item) => item.id === line.id ? { ...item, unitPrice: Number(event.target.value) } : item))} /></Field>
+                        {isInventoryPurchase && <Field><FieldLabel>Precio de venta</FieldLabel><Input type="number" min="0" value={line.sellPrice} onChange={(event) => setEditLines((current) => current.map((item) => item.id === line.id ? { ...item, sellPrice: Number(event.target.value) } : item))} /></Field>}
+                        <Field><FieldLabel>Total línea</FieldLabel><Input readOnly value={money(line.quantity * line.unitPrice)} /></Field>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )
+              })}
+
+              <Field><FieldLabel>Notas</FieldLabel><Textarea value={editNotes} onChange={(event) => setEditNotes(event.target.value)} /></Field>
+              <div className="grid gap-2 rounded-md border p-3 text-sm sm:grid-cols-3">
+                <p>Subtotal: <strong>{money(editSubtotal)}</strong></p>
+                <p>ITBIS: <strong>{money(editItbis)}</strong></p>
+                <p>Total: <strong>{money(editTotal)}</strong></p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingPurchase(null)} disabled={editSaving}>Cancelar</Button>
+            <Button onClick={savePurchaseEdit} disabled={editSaving}>
+              {editSaving ? "Guardando..." : "Guardar cambios"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ---------- Diálogo: detalle de factura ---------- */}
       <Dialog open={Boolean(detailPurchase)} onOpenChange={(open) => !open && setDetailPurchase(null)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
@@ -939,6 +1147,13 @@ export default function FacturasPage() {
                 </Button>
               ) : (
                 <p className="text-sm text-muted-foreground">Esta factura no tiene documento adjunto.</p>
+              )}
+              {canEdit && (
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => openPurchaseEditor(detailPurchase)}>
+                    <Pencil data-icon="inline-start" /> Editar factura
+                  </Button>
+                </DialogFooter>
               )}
             </div>
           )}

@@ -148,6 +148,12 @@ let whatsappClient;
 let whatsappReady = false;
 let whatsappQr = null;
 let whatsappInitializing = false;
+let whatsappReconnectTimer = null;
+let whatsappReconnectAttempt = 0;
+let whatsappGeneration = 0;
+let appIsQuitting = false;
+const WHATSAPP_RECONNECT_BASE_MS = 5_000;
+const WHATSAPP_RECONNECT_MAX_MS = 60_000;
 const SEND_DELAY_MS = 2 * 60 * 1000;
 const FALLBACK_REMINDER_MESSAGE_TEMPLATE =
   "Hola {{name}}, buenos días.\n\nLe escribimos de 049Movil para informarle que tiene una deuda pendiente de {{debt}} con nosotros. Le solicitamos que pase por una de nuestras sucursales para saldarla o realizar un abono.\n\nGracias por su atención.";
@@ -185,26 +191,39 @@ function findChromeExecutable() {
   });
 }
 
-function killOrphanedChromeProcesses() {
-  if (process.platform !== "win32") return;
-  try {
-    const { execSync } = require("child_process");
-    const command = `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name = 'chrome.exe'\\" | Where-Object { $_.CommandLine -like '*whatsapp-auth*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"`;
-    execSync(command, { stdio: "ignore" });
-    console.log("[whatsapp] Stale chrome processes killed");
-  } catch (error) {
-    console.error("[whatsapp] Error killing stale chrome processes:", error);
-  }
+function clearWhatsAppReconnect() {
+  if (whatsappReconnectTimer) clearTimeout(whatsappReconnectTimer);
+  whatsappReconnectTimer = null;
+}
+
+function scheduleWhatsAppReconnect(reason) {
+  if (whatsappReconnectTimer || appIsQuitting) return;
+  whatsappReady = false;
+  whatsappQr = null;
+  whatsappInitializing = false;
+  const attempt = whatsappReconnectAttempt++;
+  const delayMs = Math.min(WHATSAPP_RECONNECT_BASE_MS * 2 ** attempt, WHATSAPP_RECONNECT_MAX_MS);
+  console.warn(`[whatsapp] Reconnecting in ${Math.round(delayMs / 1000)}s (${reason || "connection lost"})`);
+  broadcastWhatsAppStatus();
+  whatsappReconnectTimer = setTimeout(async () => {
+    whatsappReconnectTimer = null;
+    await resetWhatsAppClient();
+    initWhatsAppClient();
+  }, delayMs);
 }
 
 function initWhatsAppClient() {
-  if (whatsappClient || whatsappInitializing) return;
+  if (whatsappClient || whatsappInitializing || appIsQuitting) return;
   whatsappInitializing = true;
-
-  killOrphanedChromeProcesses();
+  const generation = ++whatsappGeneration;
 
   const authPath = path.join(app.getPath("userData"), "whatsapp-auth");
   const chromeExecutablePath = findChromeExecutable();
+  if (!chromeExecutablePath) {
+    console.warn("[whatsapp] Chrome/Edge not found; Puppeteer will use its configured browser.");
+  } else {
+    console.log(`[whatsapp] Using browser: ${chromeExecutablePath}`);
+  }
 
   whatsappClient = new Client({
     authStrategy: new LocalAuth({ dataPath: authPath }),
@@ -226,46 +245,56 @@ function initWhatsAppClient() {
   });
 
   whatsappClient.on("qr", (qr) => {
+    if (generation !== whatsappGeneration) return;
+    clearWhatsAppReconnect();
     whatsappQr = qr;
     whatsappReady = false;
     broadcastWhatsAppStatus();
   });
 
   whatsappClient.on("ready", () => {
+    if (generation !== whatsappGeneration) return;
+    clearWhatsAppReconnect();
+    whatsappReconnectAttempt = 0;
+    whatsappInitializing = false;
     whatsappReady = true;
     whatsappQr = null;
     broadcastWhatsAppStatus();
   });
 
-  whatsappClient.on("auth_failure", () => {
-    whatsappReady = false;
-    whatsappQr = null;
-    whatsappInitializing = false;
-    broadcastWhatsAppStatus();
+  whatsappClient.on("auth_failure", (message) => {
+    if (generation !== whatsappGeneration) return;
+    console.error("[whatsapp] Authentication failure:", message);
+    scheduleWhatsAppReconnect("authentication failure");
   });
 
-  whatsappClient.on("disconnected", () => {
-    whatsappReady = false;
-    whatsappQr = null;
-    whatsappInitializing = false;
-    broadcastWhatsAppStatus();
+  whatsappClient.on("disconnected", (reason) => {
+    if (generation !== whatsappGeneration) return;
+    console.warn("[whatsapp] Disconnected:", reason);
+    scheduleWhatsAppReconnect(reason);
   });
 
   whatsappClient
     .initialize()
     .catch((error) => {
+      if (generation !== whatsappGeneration) return;
       console.error("[whatsapp] init error:", error);
       const errMsg = error?.message || String(error);
       BrowserWindow.getAllWindows().forEach((window) => {
         window.webContents.send("whatsapp:error", errMsg);
       });
+      scheduleWhatsAppReconnect(errMsg);
     })
     .finally(() => {
-      whatsappInitializing = false;
+      if (generation === whatsappGeneration && !whatsappReady && !whatsappQr) {
+        whatsappInitializing = false;
+      }
     });
 }
 
 async function resetWhatsAppClient() {
+  clearWhatsAppReconnect();
+  whatsappGeneration += 1;
   if (whatsappClient) {
     try {
       await whatsappClient.destroy();
@@ -405,4 +434,9 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", () => {
+  appIsQuitting = true;
+  clearWhatsAppReconnect();
 });

@@ -22,6 +22,7 @@ import {
   type SaleItemSource,
 } from "@/lib/transaction-classification"
 import { createClient } from "@/lib/supabase/client"
+import { fetchAllRows } from "@/lib/fetch-all-rows"
 import {
   isNetworkError,
   isAuthError,
@@ -50,6 +51,7 @@ export interface Product {
   buyPrice: number
   wholesalePrice: number
   sellPrice: number
+  minimumSellPrice?: number
   supplier: string
   capacity?: string
   imei?: string
@@ -180,6 +182,7 @@ export interface PurchaseItem {
   productName: string
   quantity: number
   unitPrice: number
+  sellPrice?: number
   total: number
 }
 
@@ -419,6 +422,7 @@ const mapProductFromDB = (rec: any, sourceTable: InventorySourceTable): Product 
     buyPrice: Number(rec.buy_price) || 0,
     wholesalePrice: Number(rec.wholesale_price) || 0,
     sellPrice: Number(rec.sell_price) || 0,
+    minimumSellPrice: Number(rec.minimum_sell_price) || 0,
     supplier: rec.supplier != null ? String(rec.supplier) : "",
     capacity: rec.capacity == null ? undefined : String(rec.capacity),
     imei: rec.imei == null ? undefined : String(rec.imei),
@@ -1495,14 +1499,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       const supabase = createClient()
       console.log("[v0] Fetching products...")
-      const productQuery = supabase.from("products").select("*")
-      const { data, error } = await withTenantFilter(
-        isSalesRoute ? productQuery.limit(SALES_INITIAL_PRODUCT_LIMIT) : productQuery,
-      ).order("created_at", { ascending: false })
+      const readInventory = (table: InventoryTableName) => {
+        const query = () => withTenantFilter(supabase.from(table).select("*"))
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false })
+        return isSalesRoute
+          ? query().limit(SALES_INITIAL_PRODUCT_LIMIT)
+          : fetchAllRows<any>((from, to) => query().range(from, to))
+      }
+      const { data, error } = await readInventory("products")
 
       if (error) {
-        markMissingTable("products")
-        setProducts([])
+        if (isMissingTableError(error)) markMissingTable("products")
         console.warn("[v0] Could not fetch products:", error)
         return
       }
@@ -1510,14 +1518,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       let formattedAlmacenProducts: Product[] = []
 
       if (!isTableMissing("armacen")) {
-        const armacenQuery = withTenantFilter(supabase.from("armacen").select("*"))
-        const scopedAlmacenQuery = isSalesRoute ? armacenQuery.limit(SALES_INITIAL_PRODUCT_LIMIT) : armacenQuery
-        const { data: armacenData, error: armacenError } = await scopedAlmacenQuery.order("created_at", {
-          ascending: false,
-        })
+        const { data: armacenData, error: armacenError } = await readInventory("armacen")
 
         if (armacenError) {
-          markMissingTable("armacen")
+          if (isMissingTableError(armacenError)) markMissingTable("armacen")
           console.warn("[v0] Could not fetch armacen:", armacenError)
         } else if (armacenData) {
           formattedAlmacenProducts = armacenData.map((row) => mapProductFromDB(row, "armacen"))
@@ -1552,6 +1556,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         .from("products")
         .select("*")
         .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
         .range(productsLoadedRef.current, productsLoadedRef.current + 24),
     ) : null
     const nextAlmacenQuery = source === "armacen" && !isTableMissing("armacen")
@@ -1560,6 +1565,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             .from("armacen")
             .select("*")
             .order("created_at", { ascending: false })
+            .order("id", { ascending: false })
             .range(almacenProductsLoadedRef.current, almacenProductsLoadedRef.current + 24),
         )
       : null
@@ -2531,6 +2537,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                   stock: product.stock,
                   min_stock: product.minStock,
                   buy_price: product.buyPrice,
+                  minimum_sell_price: product.minimumSellPrice || 0,
                   sell_price: product.sellPrice,
                   supplier: product.supplier || "",
                   capacity: product.capacity || null,
@@ -2548,6 +2555,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
                   buy_price: product.buyPrice,
                   wholesale_price: product.wholesalePrice,
                   sell_price: product.sellPrice,
+                  minimum_sell_price: product.minimumSellPrice || 0,
                   supplier: product.supplier || "",
                   capacity: product.capacity || null,
                   imei: product.imei || null,
@@ -2602,6 +2610,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       if (product.buyPrice !== undefined) updateData.buy_price = product.buyPrice
       if (targetTable === "products" && product.wholesalePrice !== undefined) updateData.wholesale_price = product.wholesalePrice
       if (product.sellPrice !== undefined) updateData.sell_price = product.sellPrice
+      if (product.minimumSellPrice !== undefined) updateData.minimum_sell_price = product.minimumSellPrice
       if (product.supplier !== undefined) updateData.supplier = product.supplier
       if (product.capacity !== undefined) updateData.capacity = product.capacity
       if (product.imei !== undefined) updateData.imei = product.imei
@@ -2609,18 +2618,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         updateData.box_number = product.boxNumber || null
       }
 
-      const { error } = await withTenantFilter(
+      const { data, error } = await withTenantFilter(
         supabase.from(targetTable).update(updateData),
-      ).eq("id", dbProductId)
+      ).eq("id", dbProductId).select("id").maybeSingle()
 
       if (error) {
         console.error("Error updating product:", error)
         setProducts(previousProducts)
         throw error
       }
+      if (!data) {
+        const notFoundError = new Error("No se encontró el producto para actualizarlo en el inventario actual.")
+        console.error("Error updating product:", notFoundError)
+        setProducts(previousProducts)
+        throw notFoundError
+      }
     } catch (error) {
       console.error("Error updating product:", error)
       setProducts(previousProducts)
+      throw error
     }
   }
 
@@ -4409,25 +4425,44 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       throw new Error("Sin permiso para agregar compras.")
     }
 
-    const tempId = generatePurchaseNumber()
+    const tempId = generateUUID()
+    const invoiceNumber = generatePurchaseNumber()
     const newPurchase: Purchase = {
       ...purchaseData,
       itbis: Number(purchaseData.itbis) || 0,
       latePenaltyPercent: Number(purchaseData.latePenaltyPercent) || 0,
       id: tempId,
-      invoiceNumber: tempId,
+      invoiceNumber,
       date: new Date().toISOString(),
     }
 
     // 1. Optimistic update
     setPurchases((prev) => [newPurchase, ...prev])
 
-    // Optimistically update stock
+    const inventoryAdjustments = new Map<string, { quantity: number; unitPrice: number; sellPrice?: number }>()
     newPurchase.items.forEach((item) => {
-      setProducts((prev) =>
-        prev.map((p) => (p.id === item.productId ? { ...p, stock: p.stock + item.quantity } : p))
-      )
+      const adjustment = inventoryAdjustments.get(item.productId)
+      inventoryAdjustments.set(item.productId, {
+        quantity: (adjustment?.quantity || 0) + item.quantity,
+        unitPrice: item.unitPrice,
+        sellPrice: item.sellPrice ?? adjustment?.sellPrice,
+      })
     })
+
+    setProducts((prev) =>
+      prev.map((product) => {
+        const adjustment = inventoryAdjustments.get(product.id)
+        if (!adjustment) return product
+
+        return {
+          ...product,
+          stock: product.stock + adjustment.quantity,
+          buyPrice: adjustment.unitPrice,
+          sellPrice: adjustment.sellPrice ?? product.sellPrice,
+          supplier: product.supplier?.trim() ? product.supplier : purchaseData.supplierId,
+        }
+      }),
+    )
 
     // Optimistically update supplier debt
     const supplier = suppliers.find((s) => s.id === purchaseData.supplierId)
@@ -4484,30 +4519,45 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     // Update DB stocks
     try {
       await Promise.all(
-        newPurchase.items.map(async (item) => {
-          const product = products.find((p) => p.id === item.productId)
+        Array.from(inventoryAdjustments.entries()).map(async ([productId, adjustment]) => {
+          const product = products.find((p) => p.id === productId)
           if (product) {
-            await withTenantFilter(
+            const inventoryUpdate = {
+              stock: product.stock + adjustment.quantity,
+              buy_price: adjustment.unitPrice,
+              supplier: product.supplier?.trim() ? product.supplier : purchaseData.supplierId,
+              ...(adjustment.sellPrice !== undefined ? { sell_price: adjustment.sellPrice } : {}),
+            }
+            const { error: inventoryUpdateError } = await withTenantFilter(
               supabase
                 .from(resolveInventoryTableById(product.id, product))
-                .update({ stock: product.stock + item.quantity }),
+                .update(inventoryUpdate),
             ).eq("id", product.sourceId || parseSourceRuntimeId(product.id)?.sourceId || product.id)
+            if (inventoryUpdateError) throw inventoryUpdateError
           }
         })
       )
     } catch (err) {
-      console.error("Error updating stocks in DB after purchase:", err)
+      console.error("Error updating product inventory after purchase:", err)
     }
 
     // Update DB supplier
     if (supplier) {
       const debtIncrease = purchaseData.paymentType === "credito" ? purchaseData.total - purchaseData.amountPaid : 0
-      await withTenantFilter(
-        supabase.from("suppliers").update({
-          debt: supplier.debt + debtIncrease,
-          total_purchases: supplier.totalPurchases + purchaseData.total,
-        }),
-      ).eq("id", supplier.id)
+      try {
+        const { error: supplierUpdateError } = await withTenantFilter(
+          supabase.from("suppliers").update({
+            debt: supplier.debt + debtIncrease,
+            total_purchases: supplier.totalPurchases + purchaseData.total,
+          }),
+        ).eq("id", supplier.id)
+
+        if (supplierUpdateError) {
+          console.error("Error updating supplier totals after purchase:", supplierUpdateError)
+        }
+      } catch (supplierUpdateError) {
+        console.error("Error updating supplier totals after purchase:", supplierUpdateError)
+      }
     }
 
     return newPurchase
@@ -4627,7 +4677,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       throw new Error("Sin permiso para editar compras.")
     }
 
+    const previousPurchase = purchases.find((purchase) => purchase.id === id)
     const previousPurchases = [...purchases]
+    const nextPurchase = previousPurchase ? { ...previousPurchase, ...updatedPurchase } : undefined
+    const inventoryChanges = new Map<string, { quantityDelta: number; item?: PurchaseItem }>()
+
+    if (previousPurchase && updatedPurchase.items !== undefined) {
+      previousPurchase.items.forEach((item) => {
+        const change = inventoryChanges.get(item.productId)
+        inventoryChanges.set(item.productId, {
+          quantityDelta: (change?.quantityDelta || 0) - item.quantity,
+          item: change?.item,
+        })
+      })
+      updatedPurchase.items.forEach((item) => {
+        const change = inventoryChanges.get(item.productId)
+        inventoryChanges.set(item.productId, {
+          quantityDelta: (change?.quantityDelta || 0) + item.quantity,
+          item,
+        })
+      })
+
+      for (const [productId, change] of inventoryChanges) {
+        const product = products.find((item) => item.id === productId)
+        if (product && product.stock + change.quantityDelta < 0) {
+          throw new Error(`No se puede reducir la cantidad de ${product.name}: el stock actual ya incluye unidades vendidas.`)
+        }
+      }
+    }
 
     // Optimistic update
     setPurchases((prev) =>
@@ -4665,14 +4742,93 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
       if (error) {
         console.error("Error updating purchase in Supabase:", error)
-        // Rollback
-        setPurchases(previousPurchases)
-        return
+        throw error
       }
     } catch (error) {
       console.error("Error updating purchase:", error)
-      // Rollback
       setPurchases(previousPurchases)
+      throw error
+    }
+
+    if (previousPurchase && updatedPurchase.items !== undefined) {
+      setProducts((currentProducts) =>
+        currentProducts.map((product) => {
+          const change = inventoryChanges.get(product.id)
+          if (!change || change.quantityDelta === 0 && !change.item) return product
+
+          return {
+            ...product,
+            stock: product.stock + change.quantityDelta,
+            buyPrice: change.item?.unitPrice ?? product.buyPrice,
+            sellPrice: change.item?.sellPrice ?? product.sellPrice,
+            supplier: product.supplier?.trim() ? product.supplier : nextPurchase?.supplierId || product.supplier,
+          }
+        }),
+      )
+
+      try {
+        const supabase = createClient()
+        await Promise.all(
+          Array.from(inventoryChanges.entries()).map(async ([productId, change]) => {
+            const product = products.find((item) => item.id === productId)
+            if (!product || change.quantityDelta === 0 && !change.item) return
+
+            const inventoryUpdate = {
+              stock: product.stock + change.quantityDelta,
+              ...(change.item ? {
+                buy_price: change.item.unitPrice,
+                ...(change.item.sellPrice !== undefined ? { sell_price: change.item.sellPrice } : {}),
+                supplier: product.supplier?.trim() ? product.supplier : nextPurchase?.supplierId || product.supplier,
+              } : {}),
+            }
+            const { error } = await withTenantFilter(
+              supabase.from(resolveInventoryTableById(product.id, product)).update(inventoryUpdate),
+            ).eq("id", product.sourceId || parseSourceRuntimeId(product.id)?.sourceId || product.id)
+            if (error) throw error
+          }),
+        )
+      } catch (error) {
+        console.error("Error reconciling inventory after purchase edit:", error)
+      }
+    }
+
+    if (previousPurchase && nextPurchase) {
+      const supplier = suppliers.find((item) => item.id === previousPurchase.supplierId)
+      if (supplier) {
+        const oldDebt = previousPurchase.paymentType === "credito"
+          ? Math.max(0, previousPurchase.total - previousPurchase.amountPaid)
+          : 0
+        const newDebt = nextPurchase.paymentType === "credito"
+          ? Math.max(0, nextPurchase.total - nextPurchase.amountPaid)
+          : 0
+        const debtDelta = newDebt - oldDebt
+        const purchaseDelta = nextPurchase.total - previousPurchase.total
+
+        setSuppliers((currentSuppliers) =>
+          currentSuppliers.map((item) => item.id === supplier.id
+            ? {
+                ...item,
+                debt: Math.max(0, item.debt + debtDelta),
+                totalPurchases: Math.max(0, item.totalPurchases + purchaseDelta),
+              }
+            : item),
+        )
+
+        if (debtDelta !== 0 || purchaseDelta !== 0) {
+          try {
+            const supabase = createClient()
+            const { error } = await withTenantFilter(
+              supabase.from("suppliers").update({
+                debt: Math.max(0, supplier.debt + debtDelta),
+                total_purchases: Math.max(0, supplier.totalPurchases + purchaseDelta),
+              }),
+            ).eq("id", supplier.id)
+            if (error) throw error
+          } catch (error) {
+            console.error("Error updating supplier totals after purchase edit:", error)
+          }
+        }
+      }
     }
   }
 
